@@ -48,7 +48,20 @@ Responses cache for 30 min, so playtimes update roughly twice an hour.
 ## Updating the site
 
 Export a fresh `index.html` from the design project, replace `public/index.html`,
-commit and push.
+commit and push. **Note:** a fresh design export overwrites hand-made UI edits
+(like the games-page customizations) — those would need re-applying.
+
+## Editing the bundled UI by hand
+
+`public/index.html` is a self-extracting bundle; the real markup + app logic live
+in its `__bundler/template` block. To edit:
+
+```bash
+node tools/template.js public/index.html work/   # unpack -> work/template.html
+# edit work/template.html (markup + the <script type="text/x-dc"> app logic)
+node tools/repack.js work/template.html public/index.html          # pack back
+node tools/repack.js work/template.html public/index.html --test   # or: point fetch at prod API for local testing
+```
 
 ## Custom domain (optional)
 

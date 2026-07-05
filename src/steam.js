@@ -8,9 +8,109 @@
 // Your Steam privacy setting "Game details" must be Public. Friends list and
 // badges degrade gracefully (null) if their privacy setting is stricter.
 
-const ACH_TOP_N = 10; // fetch per-game achievements only for the top N by playtime
+// Family-share support: Steam's public API never lists borrowed games, but
+// achievements you earn in them live on YOUR profile, and shared games show in
+// your recently-played feed. So: FAMILY_STEAM_IDS (comma-separated 64-bit ids
+// of the accounts sharing with you) lets refreshShared() diff their libraries
+// against yours to learn the shared catalog, then probe your achievements per
+// shared game a batch at a time (cron), persisting results in STEAM_CACHE KV.
 
-export async function handleSteam(env) {
+const ACH_TOP_N = 10; // fetch per-game achievements only for the top N by playtime
+const KV_KEY = 'shared:v1';
+
+const API = 'https://api.steampowered.com';
+const headerImg = (appid) => 'https://cdn.cloudflare.steamstatic.com/steam/apps/' + appid + '/header.jpg';
+// Swallow every failure mode into null so a private or flaky sub-API
+// never takes the whole payload down.
+const j = (url) => fetch(url).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+const ownedGamesUrl = (key, sid) => API + '/IPlayerService/GetOwnedGames/v1/?key=' + key + '&steamid=' + sid + '&include_appinfo=1&include_played_free_games=1&format=json';
+
+const famIds = (env) => (env.FAMILY_STEAM_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+// One refresh pass: rebuild the shared catalog and probe the next `batch`
+// appids for the user's achievements. Runs from cron (and as a lazy fallback
+// from the fetch handler via waitUntil when the KV state is stale).
+export async function refreshShared(env, batch) {
+  const key = env.STEAM_API_KEY;
+  const id = env.STEAM_ID;
+  const fam = famIds(env);
+  if (!key || !id || !fam.length || !env.STEAM_CACHE) return;
+
+  const state = (await env.STEAM_CACHE.get(KV_KEY, 'json')) || { catalog: {}, ach: {} };
+  const now = Math.floor(Date.now() / 1000);
+
+  const own = await j(ownedGamesUrl(key, id));
+  const ownGames = (own && own.response && own.response.games) || [];
+  if (!ownGames.length) return; // Steam hiccup — don't wipe the catalog on bad data
+
+  const ownSet = new Set(ownGames.map((g) => g.appid));
+  for (const fid of fam) {
+    const fo = await j(ownedGamesUrl(key, fid)); // needs their "Game details" set to Public
+    for (const g of ((fo && fo.response && fo.response.games) || [])) {
+      if (!ownSet.has(g.appid)) state.catalog[g.appid] = { name: g.name };
+    }
+  }
+  for (const appid of Object.keys(state.catalog)) {
+    if (ownSet.has(Number(appid))) { delete state.catalog[appid]; delete state.ach[appid]; }
+  }
+
+  // Recently-played includes shared games — the only public source of your
+  // playtime in games you don't own. Persist it so it sticks once seen.
+  const rec = await j(API + '/IPlayerService/GetRecentlyPlayedGames/v1/?key=' + key + '&steamid=' + id + '&format=json');
+  for (const g of ((rec && rec.response && rec.response.games) || [])) {
+    if (state.catalog[g.appid]) {
+      const e = state.ach[g.appid] = state.ach[g.appid] || {};
+      e.mins = g.playtime_forever;
+      e.weeks2 = g.playtime_2weeks || 0;
+      e.seen = now;
+    }
+  }
+
+  // Probe achievements: never-checked appids first, then the longest-unchecked.
+  const todo = Object.keys(state.catalog)
+    .sort((a, b) => ((state.ach[a] && state.ach[a].checked) || 0) - ((state.ach[b] && state.ach[b].checked) || 0))
+    .slice(0, batch || 35);
+  await Promise.all(todo.map(async (appid) => {
+    const aj = await j(API + '/ISteamUserStats/GetPlayerAchievements/v1/?key=' + key + '&steamid=' + id + '&appid=' + appid + '&format=json');
+    const e = state.ach[appid] = state.ach[appid] || {};
+    e.checked = now;
+    const list = aj && aj.playerstats && aj.playerstats.achievements;
+    if (list && list.length) {
+      e.b = list.length;
+      e.a = list.filter((x) => x.achieved).length;
+    }
+  }));
+
+  state.updated = now;
+  await env.STEAM_CACHE.put(KV_KEY, JSON.stringify(state));
+}
+
+// Shared games worth showing: any the user has achievement stats or recorded
+// playtime in. Sorted by achievements earned, then playtime.
+async function loadShared(env) {
+  if (!env.STEAM_CACHE || !famIds(env).length) return { list: [], stale: true };
+  const state = await env.STEAM_CACHE.get(KV_KEY, 'json');
+  if (!state) return { list: [], stale: true };
+  const list = Object.entries(state.catalog).map(([appid, c]) => {
+    const e = state.ach[appid] || {};
+    if (e.b == null && e.mins == null) return null;
+    return {
+      name: c.name,
+      appid: Number(appid),
+      hours: e.mins != null ? Math.round(e.mins / 60) : null,
+      mins: e.mins != null ? e.mins : null,
+      weeks2: e.weeks2 || 0,
+      last: e.seen || 0,
+      img: headerImg(appid),
+      a: e.a != null ? e.a : null,
+      b: e.b != null ? e.b : null
+    };
+  }).filter(Boolean).sort((x, y) => ((y.a || 0) - (x.a || 0)) || ((y.hours || 0) - (x.hours || 0)));
+  const stale = !state.updated || (Math.floor(Date.now() / 1000) - state.updated) > 7200;
+  return { list, stale };
+}
+
+export async function handleSteam(env, ctx) {
   const key = env.STEAM_API_KEY;
   const id = env.STEAM_ID;
   const headers = {
@@ -22,19 +122,21 @@ export async function handleSteam(env) {
     return new Response(JSON.stringify({ error: 'STEAM_API_KEY / STEAM_ID not configured' }), { status: 503, headers });
   }
 
-  const api = 'https://api.steampowered.com';
-  // Swallow every failure mode into null so a private or flaky sub-API
-  // never takes the whole payload down.
-  const j = (url) => fetch(url).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  const api = API;
 
   try {
-    const [owned, sum, lvl, badges, friends] = await Promise.all([
-      j(api + '/IPlayerService/GetOwnedGames/v1/?key=' + key + '&steamid=' + id + '&include_appinfo=1&include_played_free_games=1&format=json'),
+    const [owned, sum, lvl, badges, friends, shared] = await Promise.all([
+      j(ownedGamesUrl(key, id)),
       j(api + '/ISteamUser/GetPlayerSummaries/v2/?key=' + key + '&steamids=' + id + '&format=json'),
       j(api + '/IPlayerService/GetSteamLevel/v1/?key=' + key + '&steamid=' + id + '&format=json'),
       j(api + '/IPlayerService/GetBadges/v1/?key=' + key + '&steamid=' + id + '&format=json'),
-      j(api + '/ISteamUser/GetFriendList/v1/?key=' + key + '&steamid=' + id + '&relationship=friend&format=json')
+      j(api + '/ISteamUser/GetFriendList/v1/?key=' + key + '&steamid=' + id + '&relationship=friend&format=json'),
+      loadShared(env)
     ]);
+
+    // Bootstrap / self-heal: if the cron hasn't populated the share cache
+    // recently, kick a small refresh batch after the response is sent.
+    if (shared.stale && ctx && famIds(env).length) ctx.waitUntil(refreshShared(env, 25));
 
     const player = (sum && sum.response && sum.response.players && sum.response.players[0]) || {};
     const all = ((owned && owned.response && owned.response.games) || [])
@@ -56,7 +158,7 @@ export async function handleSteam(env) {
       mins: g.playtime_forever,
       weeks2: g.playtime_2weeks || 0,
       last: g.rtime_last_played || 0,
-      img: 'https://cdn.cloudflare.steamstatic.com/steam/apps/' + g.appid + '/header.jpg',
+      img: headerImg(g.appid),
       a: i < ACH_TOP_N ? ach[i].a : null,
       b: i < ACH_TOP_N ? ach[i].b : null
     }));
@@ -79,7 +181,8 @@ export async function handleSteam(env) {
       totalCount: (owned && owned.response && owned.response.game_count) || all.length,
       totalHours,
       recent2wHours: Math.round(all.reduce((s, g) => s + (g.playtime_2weeks || 0), 0) / 60 * 10) / 10,
-      games
+      games,
+      shared: shared.list
     }), { headers });
   } catch (e) {
     return new Response(JSON.stringify({ error: 'steam fetch failed' }), { status: 502, headers });

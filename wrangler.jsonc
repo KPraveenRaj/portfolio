@@ -10,6 +10,18 @@
     "directory": "public",
     "binding": "ASSETS"
   },
+  // Cache for family-share catalog + achievement probes (see src/steam.js).
+  "kv_namespaces": [
+    {
+      "binding": "STEAM_CACHE",
+      "id": "fd5bcb51cb424bb093f5201fb3b962a8"
+    }
+  ],
+  // Background refresh of the family-share data, a batch at a time
+  // (a single request can't probe a whole shared library — subrequest limit).
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
   "observability": {
     "enabled": true
   }

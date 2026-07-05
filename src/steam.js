@@ -85,15 +85,18 @@ export async function refreshShared(env, batch) {
   await env.STEAM_CACHE.put(KV_KEY, JSON.stringify(state));
 }
 
-// Shared games worth showing: any the user has achievement stats or recorded
-// playtime in. Sorted by achievements earned, then playtime.
+// Shared games worth showing: only ones the user has actually engaged with —
+// earned at least one achievement, or has recorded playtime. (A shared library
+// includes hundreds of games the user never launched; those have a probed
+// achievement schema but 0 earned, and would just be noise.) Sorted by
+// achievements earned, then playtime.
 async function loadShared(env) {
   if (!env.STEAM_CACHE || !famIds(env).length) return { list: [], stale: true };
   const state = await env.STEAM_CACHE.get(KV_KEY, 'json');
   if (!state) return { list: [], stale: true };
   const list = Object.entries(state.catalog).map(([appid, c]) => {
     const e = state.ach[appid] || {};
-    if (e.b == null && e.mins == null) return null;
+    if (!(e.a > 0) && e.mins == null) return null;
     return {
       name: c.name,
       appid: Number(appid),

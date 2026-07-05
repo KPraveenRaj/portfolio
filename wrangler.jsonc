@@ -1,0 +1,16 @@
+{
+  // Cloudflare Worker config — picked up by `npx wrangler deploy`
+  // (run locally or by the Workers Builds git integration).
+  "name": "portfolio",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-05",
+  // Don't wipe dashboard-set plain-text vars (STEAM_ID) on each deploy.
+  "keep_vars": true,
+  "assets": {
+    "directory": "public",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

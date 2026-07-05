@@ -1,12 +1,12 @@
-// Cloudflare Pages Function: GET /api/steam
+// Steam data endpoint: GET /api/steam
 // Returns the profile + top-6-by-playtime games for the SteamID in env vars.
-// Required environment variables (set in Cloudflare Pages → Settings → Variables and Secrets):
-//   STEAM_API_KEY — from https://steamcommunity.com/dev/apikey (store as Secret)
+// Required Worker settings (Cloudflare dashboard → Workers → portfolio →
+// Settings → Variables and Secrets):
+//   STEAM_API_KEY — from https://steamcommunity.com/dev/apikey (type: Secret)
 //   STEAM_ID      — your 64-bit SteamID (starts with 7656…)
 // Your Steam privacy setting "Game details" must be Public.
 
-export async function onRequest(context) {
-  const { env } = context;
+export async function handleSteam(env) {
   const key = env.STEAM_API_KEY;
   const id = env.STEAM_ID;
   const headers = {
